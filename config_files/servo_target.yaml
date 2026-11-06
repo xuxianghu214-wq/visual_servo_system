@@ -1,0 +1,9 @@
+# 期望标志物在 camera_optical 正前方 0.500 m、图像居中并正对相机。
+# 绕 X 轴 π：marker 的 +Z 朝观察者，camera_optical 的 +Z 朝场景深处。
+parent_frame: camera_optical
+child_frame: target
+translation_units: metres
+rotation_units: radians
+position_m: [0.0, 0.0, 0.500]
+rotation_vector_rad: [3.141592653589793, 0.0, 0.0]
+

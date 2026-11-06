@@ -1,0 +1,119 @@
+Metadata-Version: 2.4
+Name: visual-servo-system
+Version: 0.1.0
+Summary: UR5 眼在手上视觉伺服实验软件
+Requires-Python: <3.12,>=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: numpy==2.2.6
+Requires-Dist: opencv-contrib-python-headless==4.12.0.88
+Requires-Dist: PySide6==6.11.2
+Requires-Dist: harvesters==1.4.3
+Requires-Dist: genicam==1.6.0
+Requires-Dist: PyYAML==6.0.3
+Requires-Dist: scipy==1.16.3
+Requires-Dist: osqp==1.1.3
+Requires-Dist: ur_rtde==1.6.5
+Provides-Extra: dev
+Requires-Dist: pytest==9.1.1; extra == "dev"
+Requires-Dist: pytest-qt==4.5.0; extra == "dev"
+Requires-Dist: ruff==0.16.10; extra == "dev"
+
+# UR5 眼在手上视觉伺服：先看这里
+
+本目录是面向 Windows、Python 3.11、UR5 CB3（PolyScope 3.7.2）的完整实验工程。相机是
+Point Grey Research Blackfly S **BFS-U3-13Y3C**，序列号 **16276663**。工程已经包含 GenTL
+采集、固定 ID AprilTag/ArUco 位姿、图像时刻机器人位姿插值、EKF、轨迹预测、20 Hz MPC、
+125 Hz servoL 发送、安全状态机、中文界面和分流 CSV 日志。所有硬件连接和运动都必须由操作员
+逐步触发；启动程序不会自动连接机器人、使能或运动。
+
+## 标定文件的准确路径
+
+- 相机内参：`calibration_files/camera_intrinsics.yaml`
+- 眼在手上手眼外参：`calibration_files/hand_eye_eye_in_hand.yaml`
+
+两个随仓库提供的文件都是**故意不完整的模板**：`calibration_complete: false` 且标定数值为
+`null`。它们绝不是单位阵标定。未完成并复核真实标定时，软件只允许相机预览，不允许进入
+视觉伺服或向机器人发送运动命令。
+
+手眼矩阵名称固定为 `T_flange_camera`，父坐标系是 `flange`，子坐标系是
+`camera_optical`。它把相机光学坐标中的点映射到法兰坐标，平移单位为 metres（米）。
+
+## 环境与检查
+
+随工程携带的 `offline_packages`、Python 3.11.9 x64 安装程序和 Spinnaker 4.4.0.246
+离线组件合计约 **507 MB**（约 484 MiB）。复制到另一台电脑时应整体复制工程和这些安装资源，
+但**不要复制 `.venv` 和 `.python311`**；这两个目录含有原电脑的绝对路径，必须在目标电脑重新生成。
+
+首次迁移到 Windows 10/11 x64 电脑时，按顺序运行：
+
+```powershell
+.\安装相机驱动.ps1
+.\一键离线安装.ps1
+.\.venv\Scripts\python.exe .\scripts\verify_environment.py
+.\启动视觉伺服.ps1
+```
+
+驱动安装脚本会再次请求明确确认和管理员权限；Python 依赖安装本身不需要管理员权限。若当前
+工程内尚未放入 Python 安装程序、离线 wheel 或 Spinnaker 安装包，脚本会明确报出缺失文件，
+不会联网下载或伪装成功。两个安装脚本都会先按 `SHA256SUMS.txt` 严格检查文件：缺失、额外、
+被篡改或带目录穿越的清单都会被拒绝；Python 安装程序的 Authenticode 签名和相机驱动完整
+EXE 的 Authenticode 签名都必须有效。
+
+`一键离线安装.ps1` 会精确使用随工程提供的 Python 3.11.9 x64，在真实工程路径创建标准
+`.venv`。安装 wheel 和运行环境检查时，脚本自动用 `subst.exe` 将工程临时映射到一个从 Z:
+向下寻找的空闲盘符，并把 TEMP/TMP 临时指向该短路径，以规避 PySide6 在长中文路径下可能触发
+的 Win32 260 字符限制。无论成功还是失败，临时目录和盘符映射都会在 `finally` 中清理，不需要
+管理员权限，也不会让 `pyvenv.cfg` 永久引用临时盘符。工程本体采用非 editable 方式安装到
+虚拟环境；解除临时盘符后脚本还会隔离导入已安装包并加载真实启动入口，防止 `.pth` 固化
+`Z:\src` 一类临时路径。
+
+开发检查命令为：
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest
+.\.venv\Scripts\python.exe -m ruff check .
+```
+
+用户运行统一使用 `启动视觉伺服.ps1`。仓库维护时可能使用根目录含 `python.exe` 的 Conda
+开发环境，但它不是迁移部署结构；启动脚本优先使用标准 `.venv\Scripts\python.exe`，仅在
+标准入口不存在时兼容开发环境。迁移电脑必须删除/不复制旧 `.venv`，再运行一键安装脚本创建
+标准环境。
+
+直接依赖、传递依赖和构建后端的已验证版本锁在 `requirements-lock.txt`。运行配置位于
+`config_files/`，加载器不采用隐式默认值：缺字段、
+未知字段、NaN、错误单位、错误坐标系、错误枚举、错误矩阵尺寸或分辨率不匹配都会明确报错。
+
+## 界面操作顺序
+
+必须依次执行：**连接相机/预览 → 连接机器人只读 → 系统检查 → 干运行 → 选择限速档和
+仿真/实机 → 使能 → 开始跟随**。切换实机和使能均有中文确认。系统检查和干运行绝不创建或
+调用真实控制发送器；干运行会用独立仿真位姿与假发送器实际走完一次检测、时间配准、EKF、
+预测、MPC、安全门、插值和发送链。只有“实机使能”才创建控制连接、读取活动 TCP 并严格确认
+TCP=0。点击实机使能后，程序会先丢弃干运行的 EKF、预测、MPC、插值目标和稳定计数，
+再等待 TCP 授权之后的新鲜可靠 RTDE 样本，并用真实法兰历史重新累计 10 个唯一稳定帧。
+干运行中的“稳定”结果绝不能用于实机使能。
+
+干运行不发送任何 UR 运动命令，但当前批准流程仍要求先连接 UR5 **只读状态**，用于验证网络、
+机器人状态和时间数据链；它不是“不接机器人即可运行”的纯软件仿真入口。
+
+停止、故障或窗口关闭时，系统先锁存安全状态，再调用 `servoStop()` 和 `stopScript()`；恢复数据
+不会自动重启，必须点击“人工确认”并重新完成系统检查。软件停车不能代替机器人物理急停、
+安全平面和现场风险评估。实机首次运行请严格按照 `docs/实机联调步骤.md`。
+
+每次程序启动会在 `experiment_logs/` 建立不覆盖的会话目录，写入 manifest 以及 vision、EKF、
+prediction、MPC、robot_state、safety_events、timing 七类 CSV。图像/视频保存默认关闭，只有界面
+明确选择后才写入。
+
+## 坐标与时间约定
+
+- `T_parent_child` 将 child 坐标映射到 parent 坐标；平移统一使用米。
+- UR pose 为 `[x, y, z, rx, ry, rz]`，单位为米和弧度，后三项是轴角旋转向量。
+- 默认目标在相机 +Z 方向 0.500 m，并绕 X 轴 π，使标志物法向正对相机。
+- `host_timestamp_s` 是设备采样/曝光时钟映射到主机单调时钟后的时刻，只用于排序、配准和
+  延迟计算，不是 UTC 时间；`receive_timestamp_s` 是主机实际收到数据的时刻。
+- 相机没有设备曝光时间或 RTDE 没有控制器时间时会明确标为“不可靠”，只允许预览和干运行，
+  禁止进入实机闭环。时钟回退会重置映射，重新积累足够样本前同样禁止实机运动。
+- 机器人预期 TCP 必须是六维零值；只有控制接口实际读取并确认 TCP=0 后，程序才把
+  `actual_TCP_pose` 解释为 `T_base_flange`，未授信读数只作无效状态显示且不进入位姿历史。
+  授信必须通过 `sender.authorize_state_reader(reader)` 建立，并由发送器在停止或异常时自动撤销。
+

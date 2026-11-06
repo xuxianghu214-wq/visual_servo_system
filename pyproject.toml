@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools==84.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "visual-servo-system"
+version = "0.1.0"
+description = "UR5 眼在手上视觉伺服实验软件"
+readme = "README_先看这里.md"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "numpy==2.2.6",
+    "opencv-contrib-python-headless==4.12.0.88",
+    "PySide6==6.11.2",
+    "harvesters==1.4.3",
+    "genicam==1.6.0",
+    "PyYAML==6.0.3",
+    "scipy==1.16.3",
+    "osqp==1.1.3",
+    "ur_rtde==1.6.5",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==9.1.1",
+    "pytest-qt==4.5.0",
+    "ruff==0.16.10",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --basetemp=.pytest_tmp"
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+

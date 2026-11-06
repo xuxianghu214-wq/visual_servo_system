@@ -1,0 +1,18 @@
+# 根据用户提供的 1280×1024 相机内参标定结果整理。
+# plumb_bob 与本项目使用的 opencv_plumb_bob 含义相同；
+# 此处使用项目配置加载器要求的名称。
+calibration_complete: true
+image_width_px: 1280
+image_height_px: 1024
+camera_matrix:
+  - [1062.07612, 0.0, 649.899422]
+  - [0.0, 1058.94785, 516.003760]
+  - [0.0, 0.0, 1.0]
+distortion_model: opencv_plumb_bob
+distortion_coefficients:
+  - -0.3438419066472606
+  - -0.044368161046495186
+  - -0.0000777445159690799
+  - 0.0005529989381854376
+  - 0.518441903223839
+units: pixels

@@ -1,0 +1,14 @@
+initial_max_position_error_m: 0.08
+initial_max_rotation_error_deg: 10.0
+workspace_envelope_position_m: 0.10
+workspace_envelope_rotation_deg: 15.0
+commissioning_speed_mps: 0.05
+experiment_speed_mps: 0.12
+commissioning_angular_speed_deg_s: 15.0
+experiment_angular_speed_deg_s: 30.0
+dropout_timeout_s: 1.0
+max_3sigma_position_m: 0.03
+max_3sigma_rotation_deg: 5.0
+stable_frames_required: 10
+max_latency_s: 0.10
+

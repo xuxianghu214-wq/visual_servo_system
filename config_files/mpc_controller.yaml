@@ -1,0 +1,7 @@
+control_frequency_hz: 20.0
+dt_s: 0.05
+horizon_steps: 20
+solver_time_limit_s: 0.02
+max_linear_acceleration_mps2: 0.25
+max_angular_acceleration_deg_s2: 90.0
+

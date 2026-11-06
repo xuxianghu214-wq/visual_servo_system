@@ -1,0 +1,14 @@
+# 已根据实机确认：Point Grey Research Blackfly S BFS-U3-13Y3C。
+# 固定序列号可避免电脑同时接入多台相机时误选设备。
+selection_mode: serial
+device_serial: "16276663"
+acquisition_mode: Continuous
+# 该彩色型号的 Mono8 会强制 ISP 2x binning，只能输出 640x512。
+# 使用原始 BayerRG8 才能保持传感器完整 1280x1024，采集后由 OpenCV 转为 BGR。
+pixel_format: BayerRG8
+image_width_px: 1280
+image_height_px: 1024
+frame_rate_hz: 30.0
+# 实机USB接收抖动约14-16 ms；20 ms可稳定完成设备时钟到主机单调时钟映射。
+timestamp_max_uncertainty_s: 0.020
+

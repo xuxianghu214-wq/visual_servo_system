@@ -1,0 +1,11 @@
+detector: apriltag
+supported_detectors:
+  - apriltag
+  - aruco
+family: tag36h11
+aruco_dictionary: DICT_4X4_50
+marker_id: 0
+marker_size_m: 0.08
+# 只缩小用于标签搜索的灰度图；角点会映射回原分辨率后再做 PnP。
+detection_scale: 0.5
+
