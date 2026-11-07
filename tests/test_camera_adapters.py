@@ -379,6 +379,44 @@ def test_capture_configures_supported_nodes_and_releases_every_resource(tmp_path
     assert harvester.reset_called
 
 
+def test_capture_profiles_wait_mapping_conversion_copy_and_packet_build(tmp_path: Path) -> None:
+    class Recorder:
+        def __init__(self):
+            self.records = []
+
+        def record(self, **values):
+            self.records.append(values)
+
+    cti = tmp_path / "Spinnaker.cti"
+    cti.write_bytes(b"x")
+    harvester = _Harvester()
+    recorder = Recorder()
+    capture = GentlCameraCapture(
+        _settings(),
+        cti_files=[cti],
+        harvester_factory=lambda: harvester,
+        monotonic_ns=lambda: 1_250_000_000,
+        performance_profiler=recorder,
+    )
+    capture.connect()
+
+    capture.fetch_frame()
+
+    stages = {record["stage"] for record in recorder.records}
+    assert {
+        "fetch_wait",
+        "timestamp_mapping",
+        "component_array_view",
+        "image_copy",
+        "packet_construction",
+        "fetch_total",
+    } <= stages
+    assert next(
+        record for record in recorder.records if record["stage"] == "fetch_wait"
+    )["kind"] == "wait"
+    capture.close()
+
+
 def test_capture_resets_geometry_dependencies_before_requesting_full_resolution(
     tmp_path: Path,
 ) -> None:

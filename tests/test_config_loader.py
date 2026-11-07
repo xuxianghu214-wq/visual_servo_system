@@ -170,6 +170,8 @@ def test_default_system_configuration_matches_approved_values() -> None:
     assert config.robot.controller_family == "CB3"
     assert config.robot.polyscope_version == "3.7.2"
     assert config.robot.state_frequency_hz == pytest.approx(125.0)
+    assert config.robot.clock_max_uncertainty_s == pytest.approx(0.005)
+    assert config.robot.clock_reset_backjump_s == pytest.approx(1.0)
     np.testing.assert_allclose(config.robot.expected_tcp_pose_ur, np.zeros(6))
     np.testing.assert_allclose(config.target.T_camera_target_desired[:3, 3], [0, 0, 0.5])
     np.testing.assert_allclose(
@@ -194,6 +196,37 @@ def test_default_system_configuration_matches_approved_values() -> None:
     assert config.safety.max_3sigma_rotation_deg == pytest.approx(5.0)
     assert config.safety.stable_frames_required == 10
     assert config.safety.max_latency_s == pytest.approx(0.1)
+    assert config.diagnostics.performance_mode == "OFF"
+    assert config.diagnostics.queue_capacity == 4096
+    assert config.diagnostics.batch_size == 256
+    assert config.diagnostics.flush_interval_s == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize("mode", ["OFF", "LIGHT", "FULL_ASYNC"])
+def test_diagnostics_mode_is_strictly_loaded(tmp_path: Path, mode: str) -> None:
+    _copy_config_files(tmp_path)
+    path = tmp_path / "diagnostics_settings.yaml"
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    data["performance_mode"] = mode
+    _write_yaml(path, data)
+
+    assert load_system_config(tmp_path).diagnostics.performance_mode == mode
+
+
+def test_diagnostics_rejects_unknown_mode_and_unbounded_capacity(tmp_path: Path) -> None:
+    _copy_config_files(tmp_path)
+    path = tmp_path / "diagnostics_settings.yaml"
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    data["performance_mode"] = "DEBUG_FOREVER"
+    _write_yaml(path, data)
+    with pytest.raises(ConfigurationError, match="performance_mode"):
+        load_system_config(tmp_path)
+
+    data["performance_mode"] = "LIGHT"
+    data["queue_capacity"] = 0
+    _write_yaml(path, data)
+    with pytest.raises(ConfigurationError, match="queue_capacity"):
+        load_system_config(tmp_path)
 
 
 def test_system_configuration_rejects_missing_and_nan_values(tmp_path: Path) -> None:

@@ -251,6 +251,9 @@ class RobotStateSample:
     timestamp_source: str = "host_midpoint"
     timestamp_reliable: bool = False
     timestamp_uncertainty_s: float = float("inf")
+    controller_timestamp_s: float | None = None
+    sample_identity: str = "unspecified"
+    clock_sample_status: str = "host_only"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "host_timestamp_s", _timestamp(self.host_timestamp_s))
@@ -289,6 +292,21 @@ class RobotStateSample:
             self,
             "timestamp_uncertainty_s",
             _timestamp_uncertainty(self.timestamp_uncertainty_s),
+        )
+        if self.controller_timestamp_s is not None:
+            controller_timestamp_s = _strict_float(
+                self.controller_timestamp_s, "controller_timestamp_s"
+            )
+            if controller_timestamp_s < 0.0:
+                raise ValueError("controller_timestamp_s must be non-negative")
+            object.__setattr__(self, "controller_timestamp_s", controller_timestamp_s)
+        object.__setattr__(
+            self, "sample_identity", _strict_text(self.sample_identity, "sample_identity")
+        )
+        object.__setattr__(
+            self,
+            "clock_sample_status",
+            _strict_text(self.clock_sample_status, "clock_sample_status"),
         )
 
 

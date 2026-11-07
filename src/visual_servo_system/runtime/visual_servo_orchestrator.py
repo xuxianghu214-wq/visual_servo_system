@@ -149,6 +149,7 @@ class VisualServoOrchestrator:
         safety: VisualServoSafetyMonitor | None = None,
         interpolator: Any | None = None,
         start_background_threads: bool = True,
+        performance_profiler: Any | None = None,
     ) -> None:
         self.camera_worker = camera_worker
         self.state_reader = state_reader
@@ -158,6 +159,7 @@ class VisualServoOrchestrator:
         self._clock = clock
         self.logger = logger
         self.video_recorder = video_recorder
+        self.performance_profiler = performance_profiler
         # 同步回放/单元测试可关闭后台线程；生产工厂保留默认值 True。
         self._start_background_threads = bool(start_background_threads)
         self.mode = RuntimeMode.PREVIEW
@@ -227,6 +229,29 @@ class VisualServoOrchestrator:
             self._metrics.recognition_rate_hz,
             self._metrics.latency_s if latency_s is None else latency_s,
             message,
+        )
+
+    def _record_performance(
+        self,
+        stage: str,
+        kind: str,
+        duration_ns: int,
+        *,
+        sequence_number: int | None = None,
+        source: str = "vision",
+        **details: Any,
+    ) -> None:
+        """只记录诊断数据，不参与任何状态转换或运动许可。"""
+
+        if self.performance_profiler is None:
+            return
+        self.performance_profiler.record(
+            source=source,
+            stage=stage,
+            kind=kind,
+            duration_ns=int(max(0, duration_ns)),
+            sequence_number=sequence_number,
+            **details,
         )
 
     def start_preview(self) -> None:
@@ -749,10 +774,36 @@ class VisualServoOrchestrator:
     def process_vision_step(
         self, frame: FramePacket | None = None
     ) -> MarkerPoseObservation:
+        cycle = getattr(self.performance_profiler, "cycle", None)
+        if callable(cycle):
+            with cycle():
+                return self._process_profiled_vision_step(frame)
+        return self._process_profiled_vision_step(frame)
+
+    def _process_profiled_vision_step(
+        self, frame: FramePacket | None = None
+    ) -> MarkerPoseObservation:
         # 实机授权代次清理与视觉状态更新不得交叉，否则旧 EKF
         # 可能在 clear 之后又被写回。
+        total_started_ns = time.perf_counter_ns()
+        lock_started_ns = time.perf_counter_ns()
+        sequence_number = None if frame is None else frame.sequence_number
         with self._pipeline_lock:
-            return self._process_vision_step_locked(frame)
+            self._record_performance(
+                "pipeline_lock_wait",
+                "lock",
+                time.perf_counter_ns() - lock_started_ns,
+                sequence_number=sequence_number,
+            )
+            try:
+                return self._process_vision_step_locked(frame)
+            finally:
+                self._record_performance(
+                    "vision_step_total",
+                    "total",
+                    time.perf_counter_ns() - total_started_ns,
+                    sequence_number=sequence_number,
+                )
 
     def _process_vision_step_locked(
         self, frame: FramePacket | None = None
@@ -764,13 +815,61 @@ class VisualServoOrchestrator:
             if latest is None:
                 raise RuntimeError("尚未收到相机图像")
             frame = latest[1]
+        previous_frame_sequence = self._last_processed_frame_sequence
         if frame.sequence_number <= self._last_processed_frame_sequence:
+            self._record_performance(
+                "duplicate_frame_rejected",
+                "queue",
+                0,
+                sequence_number=frame.sequence_number,
+                detail=f"previous={self._last_processed_frame_sequence}",
+            )
             raise RuntimeError("拒绝重复处理同一帧")
+        queue_now = float(self._clock())
+        frames_skipped = max(0, frame.sequence_number - previous_frame_sequence - 1)
+        self._record_performance(
+            "frame_queue_age",
+            "queue",
+            0,
+            sequence_number=frame.sequence_number,
+            frame_host_timestamp_s=frame.host_timestamp_s,
+            receive_timestamp_s=frame.receive_timestamp_s,
+            queue_age_ms=max(0.0, queue_now - frame.receive_timestamp_s) * 1000.0,
+            capture_age_ms=max(0.0, queue_now - frame.host_timestamp_s) * 1000.0,
+            frames_skipped=frames_skipped,
+            timestamp_source=frame.timestamp_source,
+            timestamp_reliable=frame.timestamp_reliable,
+            timestamp_uncertainty_ms=frame.timestamp_uncertainty_s * 1000.0,
+        )
         self._last_processed_frame_sequence = frame.sequence_number
         started = float(self._clock())
+        stage_started_ns = time.perf_counter_ns()
         observation = self.detector.detect(frame.image, frame.host_timestamp_s)
+        self._record_performance(
+            "marker_detect",
+            "compute",
+            time.perf_counter_ns() - stage_started_ns,
+            sequence_number=frame.sequence_number,
+        )
+        detector_timings = getattr(self.detector, "last_stage_timings_ns", {})
+        for stage_name, duration_ns in detector_timings.items():
+            self._record_performance(
+                stage_name,
+                "compute" if stage_name != "detector_total" else "total",
+                int(duration_ns),
+                sequence_number=frame.sequence_number,
+                source="vision_detector",
+            )
         self.latest_observation.publish(observation)
+        stage_started_ns = time.perf_counter_ns()
         annotated = self.detector.draw_detection(frame.image, observation)
+        self._record_performance(
+            "annotation",
+            "compute",
+            time.perf_counter_ns() - stage_started_ns,
+            sequence_number=frame.sequence_number,
+        )
+        stage_started_ns = time.perf_counter_ns()
         self.latest_annotated_frame.publish(
             FramePacket(
                 frame.host_timestamp_s,
@@ -784,8 +883,21 @@ class VisualServoOrchestrator:
                 timestamp_uncertainty_s=frame.timestamp_uncertainty_s,
             )
         )
+        self._record_performance(
+            "annotated_frame_copy_and_publish",
+            "copy",
+            time.perf_counter_ns() - stage_started_ns,
+            sequence_number=frame.sequence_number,
+        )
         if self.video_recorder is not None:
+            stage_started_ns = time.perf_counter_ns()
             self.video_recorder.write(annotated)
+            self._record_performance(
+                "optional_video_write",
+                "io",
+                time.perf_counter_ns() - stage_started_ns,
+                sequence_number=frame.sequence_number,
+            )
         now = float(self._clock())
         self._last_frame_arrival_s = now
         if observation.valid:
@@ -798,6 +910,7 @@ class VisualServoOrchestrator:
         message = "视觉观测有效" if observation.valid else "未识别到固定 ID"
         self._metrics = RuntimeMetrics(rate, latency, message)
         if self.logger is not None:
+            stage_started_ns = time.perf_counter_ns()
             translation = observation.T_camera_marker[:3, 3]
             self.logger.write(
                 "vision",
@@ -817,6 +930,12 @@ class VisualServoOrchestrator:
                     "timestamp_reliable": frame.timestamp_reliable,
                     "timestamp_uncertainty_s": frame.timestamp_uncertainty_s,
                 },
+            )
+            self._record_performance(
+                "vision_csv_write",
+                "io",
+                time.perf_counter_ns() - stage_started_ns,
+                sequence_number=frame.sequence_number,
             )
         if not observation.valid:
             if self.state in {
@@ -901,6 +1020,7 @@ class VisualServoOrchestrator:
         else:
             self._dry_sample_at(observation.host_timestamp_s)
             pose_history = self._dry_pose_history
+        stage_started_ns = time.perf_counter_ns()
         try:
             robot_at_image = pose_history.interpolate(observation.host_timestamp_s)
         except (LookupError, ValueError) as error:
@@ -916,6 +1036,13 @@ class VisualServoOrchestrator:
                     self._hardware_sync_condition.notify_all()
                 return observation
             raise RuntimeError(f"图像时刻机器人位姿不可插值：{error}") from error
+        finally:
+            self._record_performance(
+                "robot_pose_interpolation",
+                "compute",
+                time.perf_counter_ns() - stage_started_ns,
+                sequence_number=frame.sequence_number,
+            )
         robot_time_valid = bool(
             robot_at_image.valid
             and (
@@ -941,11 +1068,19 @@ class VisualServoOrchestrator:
                 return observation
             raise RuntimeError("图像时刻机器人位姿的插值端点不可靠或不确定度超限")
         assert self._T_flange_camera is not None
+        stage_started_ns = time.perf_counter_ns()
         T_base_marker = compose_transforms(
             robot_at_image.T_base_flange,
             self._T_flange_camera,
             observation.T_camera_marker,
         )
+        self._record_performance(
+            "coordinate_transform",
+            "compute",
+            time.perf_counter_ns() - stage_started_ns,
+            sequence_number=frame.sequence_number,
+        )
+        stage_started_ns = time.perf_counter_ns()
         try:
             estimate = self.ekf.update(T_base_marker, observation.host_timestamp_s)
         except EkfTimestampGapError:
@@ -953,10 +1088,25 @@ class VisualServoOrchestrator:
                 raise
             self._reset_estimation_after_preview_gap()
             estimate = self.ekf.update(T_base_marker, observation.host_timestamp_s)
+        finally:
+            self._record_performance(
+                "ekf_update",
+                "compute",
+                time.perf_counter_ns() - stage_started_ns,
+                sequence_number=frame.sequence_number,
+            )
+        stage_started_ns = time.perf_counter_ns()
         prediction = self.predictor.predict(estimate, observation.host_timestamp_s)
+        self._record_performance(
+            "trajectory_prediction",
+            "compute",
+            time.perf_counter_ns() - stage_started_ns,
+            sequence_number=frame.sequence_number,
+        )
         self.latest_estimate.publish(estimate)
         self.latest_prediction.publish(prediction)
         if self.logger is not None:
+            stage_started_ns = time.perf_counter_ns()
             position = estimate.T_base_target[:3, 3]
             self.logger.write(
                 "ekf",
@@ -984,7 +1134,14 @@ class VisualServoOrchestrator:
                     "reason": prediction.reason,
                 },
             )
+            self._record_performance(
+                "estimation_csv_writes",
+                "io",
+                time.perf_counter_ns() - stage_started_ns,
+                sequence_number=frame.sequence_number,
+            )
         if self.state is VisualServoState.VALIDATED:
+            stage_started_ns = time.perf_counter_ns()
             desired_flange = build_desired_flange_pose(
                 T_base_marker,
                 self._T_flange_camera,
@@ -1010,7 +1167,14 @@ class VisualServoOrchestrator:
             )
             with self._hardware_sync_condition:
                 self._hardware_sync_condition.notify_all()
+            self._record_performance(
+                "target_stability_check",
+                "compute",
+                time.perf_counter_ns() - stage_started_ns,
+                sequence_number=frame.sequence_number,
+            )
         if self.logger is not None:
+            stage_started_ns = time.perf_counter_ns()
             self.logger.write(
                 "timing",
                 {
@@ -1019,6 +1183,12 @@ class VisualServoOrchestrator:
                     "duration_ms": max(0.0, float(self._clock()) - started) * 1000.0,
                     "latency_ms": latency * 1000.0,
                 },
+            )
+            self._record_performance(
+                "legacy_timing_csv_write",
+                "io",
+                time.perf_counter_ns() - stage_started_ns,
+                sequence_number=frame.sequence_number,
             )
         return observation
 
@@ -1107,6 +1277,9 @@ class VisualServoOrchestrator:
                     "timestamp_source": robot.timestamp_source,
                     "timestamp_reliable": robot.timestamp_reliable,
                     "timestamp_uncertainty_s": robot.timestamp_uncertainty_s,
+                    "controller_timestamp_s": robot.controller_timestamp_s,
+                    "sample_identity": robot.sample_identity,
+                    "clock_sample_status": robot.clock_sample_status,
                 },
             )
             self.logger.write(
@@ -1222,7 +1395,13 @@ class VisualServoOrchestrator:
         sequence = 0
         while not self._shutdown_event.is_set():
             try:
+                wait_started_ns = time.perf_counter_ns()
                 newer = self.camera_worker.latest_frame.wait_for_newer(sequence, 0.1)
+                self._record_performance(
+                    "latest_frame_wait",
+                    "wait",
+                    time.perf_counter_ns() - wait_started_ns,
+                )
                 if newer is None:
                     if self.camera_worker.last_error is not None:
                         raise RuntimeError(f"相机断开：{self.camera_worker.last_error}")
@@ -1336,6 +1515,10 @@ class VisualServoOrchestrator:
                     ("实机发送器", self.real_sender.disconnect),
                     ("干运行发送器", self._dry_sender.disconnect),
                     ("视频", getattr(self.video_recorder, "close", lambda: None)),
+                    (
+                        "性能诊断",
+                        getattr(self.performance_profiler, "close", lambda: None),
+                    ),
                     ("日志", getattr(self.logger, "close", lambda: None)),
                 )
                 for name, closer in closers:

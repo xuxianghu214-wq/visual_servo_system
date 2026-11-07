@@ -2,6 +2,10 @@ host: 192.168.0.10
 controller_family: CB3
 polyscope_version: "3.7.2"
 state_frequency_hz: 125.0
+# RTDE 设备时钟映射的严格门限；不得为追求表面可靠率而放宽。
+clock_max_uncertainty_s: 0.005
+# 小于此值的回退按乱序旧包处理，达到此值才认为真实时基重置。
+clock_reset_backjump_s: 1.0
 # UR pose: [x, y, z, rx, ry, rz]，单位依次为 metres、radians。
 expected_tcp_pose_ur: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 pose_units: metres_radians

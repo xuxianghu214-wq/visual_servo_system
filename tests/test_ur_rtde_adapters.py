@@ -110,6 +110,61 @@ def test_state_reader_maps_controller_timestamp_and_reports_reliable_time() -> N
     reader.close()
 
 
+def test_state_reader_does_not_publish_duplicate_controller_state() -> None:
+    class TimestampedReceive(_Receive):
+        controller_time = 1.0
+
+        def getTimestamp(self):
+            return self.controller_time
+
+    receive = TimestampedReceive("x", 125.0)
+    host_time = 10.0
+
+    def monotonic():
+        nonlocal host_time
+        host_time += 0.0005
+        return host_time
+
+    reader = UrRtdeStateReader(
+        "192.168.0.10",
+        receive_factory=lambda *_args: receive,
+        monotonic=monotonic,
+    )
+    reader.connect()
+
+    first = reader.read_once()
+    published_before = reader.latest_state.get_latest()
+    duplicate = reader.read_once()
+    published_after = reader.latest_state.get_latest()
+
+    assert first is not None
+    assert duplicate is None
+    assert published_after == published_before
+    assert reader.sample_diagnostics.duplicate == 1
+    assert reader.sample_diagnostics.accepted == 1
+    assert reader.sample_diagnostics.clock_reset == 0
+    reader.close()
+
+
+def test_state_reader_exposes_controller_sample_identity() -> None:
+    class TimestampedReceive(_Receive):
+        def getTimestamp(self):
+            return 42.125
+
+    reader = UrRtdeStateReader(
+        "192.168.0.10",
+        receive_factory=lambda *_args: TimestampedReceive("x", 125.0),
+        monotonic=lambda: 100.0,
+    )
+    reader.connect()
+    sample = reader.read_once()
+
+    assert sample is not None
+    assert sample.controller_timestamp_s == pytest.approx(42.125)
+    assert sample.sample_identity == "ur-controller:42.125000000"
+    reader.close()
+
+
 def test_deferred_sender_stop_releases_generation_and_reconnects_fresh() -> None:
     sample = RobotStateSample(1.0, np.eye(4), valid=False)
 

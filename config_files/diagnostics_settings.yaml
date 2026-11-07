@@ -1,0 +1,7 @@
+# 性能诊断模式：OFF 适合正常联调，LIGHT 只输出汇总，FULL_ASYNC 用于专项性能测试。
+performance_mode: "OFF"
+queue_capacity: 4096
+batch_size: 256
+flush_interval_s: 1.0
+light_summary_interval_s: 1.0
+close_timeout_s: 2.0

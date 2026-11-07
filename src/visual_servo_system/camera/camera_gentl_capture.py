@@ -115,20 +115,32 @@ def _format_name(component: Any) -> str:
     return str(getattr(raw, "name", raw)).split(".")[-1]
 
 
-def convert_component_to_image(component: Any) -> np.ndarray:
+def convert_component_to_image(
+    component: Any,
+    *,
+    stage_timings_ns: dict[str, int] | None = None,
+    perf_counter_ns: Callable[[], int] = time.perf_counter_ns,
+) -> np.ndarray:
     """把 GenICam component 复制为连续 Mono8 或 OpenCV BGR 图像。"""
 
+    total_started_ns = perf_counter_ns()
     width = int(component.width)
     height = int(component.height)
     if width <= 0 or height <= 0:
         raise CameraFrameError("相机返回了无效图像尺寸")
+    stage_started_ns = perf_counter_ns()
     raw = np.asarray(component.data, dtype=np.uint8)
     name = _format_name(component)
+    if stage_timings_ns is not None:
+        stage_timings_ns["component_array_view"] = perf_counter_ns() - stage_started_ns
+    stage_started_ns = perf_counter_ns()
+    conversion_stage = "pixel_unpack"
     if name in {"Mono8", "Mono8Packed"}:
         image = raw[: width * height].reshape(height, width)
     elif name in {"RGB8", "RGB8Packed"}:
         rgb = raw[: width * height * 3].reshape(height, width, 3)
         image = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+        conversion_stage = "rgb_to_bgr"
     elif name in {"BGR8", "BGR8Packed"}:
         image = raw[: width * height * 3].reshape(height, width, 3)
     elif name in {"BayerRG8", "BayerGR8", "BayerGB8", "BayerBG8"}:
@@ -142,9 +154,17 @@ def convert_component_to_image(component: Any) -> np.ndarray:
             "BayerBG8": cv2.COLOR_BayerRG2BGR,
         }[name]
         image = cv2.cvtColor(bayer, conversion)
+        conversion_stage = "bayer_to_bgr"
     else:
         raise CameraFrameError(f"不支持的相机像素格式：{name or '未知'}")
-    return np.ascontiguousarray(image).copy()
+    if stage_timings_ns is not None:
+        stage_timings_ns[conversion_stage] = perf_counter_ns() - stage_started_ns
+    stage_started_ns = perf_counter_ns()
+    result = np.ascontiguousarray(image).copy()
+    if stage_timings_ns is not None:
+        stage_timings_ns["image_copy"] = perf_counter_ns() - stage_started_ns
+        stage_timings_ns["component_decode_total"] = perf_counter_ns() - total_started_ns
+    return result
 
 
 def _set_node_if_supported(node_map: Any, name: str, value: str) -> bool:
@@ -260,6 +280,8 @@ class GentlCameraCapture:
         harvester_factory: Callable[[], Any] | None = None,
         monotonic_ns: Callable[[], int] = time.monotonic_ns,
         clock_mapper: DeviceClockMapper | None = None,
+        performance_profiler: Any | None = None,
+        perf_counter_ns: Callable[[], int] = time.perf_counter_ns,
     ) -> None:
         self.settings = settings
         found = discover_cti_files(cti_files)
@@ -269,12 +291,35 @@ class GentlCameraCapture:
         self._clock_mapper = clock_mapper or DeviceClockMapper(
             max_uncertainty_s=settings.timestamp_max_uncertainty_s
         )
+        self.performance_profiler = performance_profiler
+        self._perf_counter_ns = perf_counter_ns
         self._harvester: Any | None = None
         self._acquirer: Any | None = None
         self._sequence = 0
         self._closed = True
         self.pixel_format_fallback = False
         self.status_message = "尚未连接"
+        self._last_capture_timestamp_s: float | None = None
+
+    def _record_performance(
+        self,
+        stage: str,
+        kind: str,
+        duration_ns: int,
+        *,
+        sequence_number: int | None = None,
+        **details: Any,
+    ) -> None:
+        if self.performance_profiler is None:
+            return
+        self.performance_profiler.record(
+            source="camera",
+            stage=stage,
+            kind=kind,
+            duration_ns=int(max(0, duration_ns)),
+            sequence_number=sequence_number,
+            **details,
+        )
 
     @staticmethod
     def _default_harvester_factory() -> Any:
@@ -380,19 +425,40 @@ class GentlCameraCapture:
         self._harvester = harvester
         self._acquirer = acquirer
         self._sequence = 0
+        self._last_capture_timestamp_s = None
         self._closed = False
 
     def fetch_frame(self, timeout_s: float = 0.2) -> FramePacket:
+        cycle = getattr(self.performance_profiler, "cycle", None)
+        if callable(cycle):
+            with cycle():
+                return self._fetch_frame_profiled(timeout_s)
+        return self._fetch_frame_profiled(timeout_s)
+
+    def _fetch_frame_profiled(self, timeout_s: float = 0.2) -> FramePacket:
         if not self.connected:
             raise CameraConnectionError("相机尚未连接")
         if not np.isfinite(timeout_s) or timeout_s <= 0.0:
             raise ValueError("timeout_s must be finite and positive")
+        fetch_total_started_ns = self._perf_counter_ns()
         try:
+            fetch_wait_started_ns = self._perf_counter_ns()
             with self._acquirer.fetch(timeout=float(timeout_s)) as buffer:
+                self._record_performance(
+                    "fetch_wait",
+                    "wait",
+                    self._perf_counter_ns() - fetch_wait_started_ns,
+                    sequence_number=self._sequence,
+                )
                 # receive_timestamp 是主机拿到缓冲区的时刻；若相机提供曝光设备时间，
                 # 再通过时钟映射得到真正用于配准的 capture host timestamp。
                 receive_timestamp_s = float(self._clock_ns()) / 1_000_000_000.0
                 device_timestamp_ns = getattr(buffer, "timestamp_ns", None)
+                mapping_started_ns = self._perf_counter_ns()
+                residual_rms_s = float("nan")
+                clock_sample_count = self._clock_mapper.sample_count
+                clock_reset_count = self._clock_mapper.reset_count
+                clock_sample_status = "host_only"
                 if device_timestamp_ns is None:
                     capture_timestamp_s = receive_timestamp_s
                     timestamp_source = "host_receive"
@@ -406,10 +472,33 @@ class GentlCameraCapture:
                     mapping = self._clock_mapper.observe(
                         device_timestamp_s, receive_timestamp_s
                     )
+                    clock_sample_status = mapping.status.value
                     capture_timestamp_s = mapping.host_timestamp_s
                     timestamp_source = "camera_device"
                     timestamp_reliable = mapping.reliable
                     timestamp_uncertainty_s = mapping.uncertainty_s
+                    residual_rms_s = mapping.residual_rms_s
+                    clock_sample_count = mapping.sample_count
+                    clock_reset_count = mapping.reset_count
+                self._record_performance(
+                    "timestamp_mapping",
+                    "compute",
+                    self._perf_counter_ns() - mapping_started_ns,
+                    sequence_number=self._sequence,
+                    frame_host_timestamp_s=capture_timestamp_s,
+                    receive_timestamp_s=receive_timestamp_s,
+                    timestamp_source=timestamp_source,
+                    timestamp_reliable=timestamp_reliable,
+                    timestamp_uncertainty_ms=timestamp_uncertainty_s * 1000.0,
+                    mapped_transport_delay_ms=max(
+                        0.0, receive_timestamp_s - capture_timestamp_s
+                    )
+                    * 1000.0,
+                    clock_residual_rms_ms=residual_rms_s * 1000.0,
+                    clock_sample_count=clock_sample_count,
+                    clock_reset_count=clock_reset_count,
+                    detail=clock_sample_status,
+                )
                 components = buffer.payload.components
                 if not components:
                     raise CameraFrameError("相机缓冲区没有图像 component")
@@ -423,12 +512,26 @@ class GentlCameraCapture:
                     raise CameraFrameError(
                         f"实际图像分辨率 {actual_size} 与配置/标定分辨率 {expected_size} 不符"
                     )
-                image = convert_component_to_image(component)
+                component_timings: dict[str, int] = {}
+                image = convert_component_to_image(
+                    component,
+                    stage_timings_ns=component_timings,
+                    perf_counter_ns=self._perf_counter_ns,
+                )
+                for stage, duration_ns in component_timings.items():
+                    kind = "copy" if stage == "image_copy" else "compute"
+                    self._record_performance(
+                        stage,
+                        kind,
+                        duration_ns,
+                        sequence_number=self._sequence,
+                    )
         except CameraFrameError:
             raise
         except Exception as error:
             raise CameraFrameError(f"取帧失败：{error}") from error
         quality = 0.9 if self.pixel_format_fallback else 1.0
+        packet_started_ns = self._perf_counter_ns()
         packet = FramePacket(
             capture_timestamp_s,
             self._sequence,
@@ -439,6 +542,36 @@ class GentlCameraCapture:
             timestamp_source=timestamp_source,
             timestamp_reliable=timestamp_reliable,
             timestamp_uncertainty_s=timestamp_uncertainty_s,
+        )
+        self._record_performance(
+            "packet_construction",
+            "copy",
+            self._perf_counter_ns() - packet_started_ns,
+            sequence_number=self._sequence,
+        )
+        if self._last_capture_timestamp_s is not None:
+            interval_s = max(0.0, capture_timestamp_s - self._last_capture_timestamp_s)
+            self._record_performance(
+                "capture_interval",
+                "wait",
+                int(interval_s * 1_000_000_000.0),
+                sequence_number=self._sequence,
+            )
+        self._last_capture_timestamp_s = capture_timestamp_s
+        self._record_performance(
+            "fetch_total",
+            "total",
+            self._perf_counter_ns() - fetch_total_started_ns,
+            sequence_number=self._sequence,
+            frame_host_timestamp_s=capture_timestamp_s,
+            receive_timestamp_s=receive_timestamp_s,
+            timestamp_source=timestamp_source,
+            timestamp_reliable=timestamp_reliable,
+            timestamp_uncertainty_ms=timestamp_uncertainty_s * 1000.0,
+            mapped_transport_delay_ms=max(
+                0.0, receive_timestamp_s - capture_timestamp_s
+            )
+            * 1000.0,
         )
         self._sequence += 1
         return packet
@@ -498,12 +631,32 @@ class CameraCaptureWorker:
     def _run(self) -> None:
         try:
             while not self._stop.is_set():
-                self.latest_frame.publish(self.capture.fetch_frame(self.fetch_timeout_s))
+                profiler = getattr(self.capture, "performance_profiler", None)
+                cycle = getattr(profiler, "cycle", None)
+                if callable(cycle):
+                    with cycle():
+                        self._capture_and_publish_once()
+                else:
+                    self._capture_and_publish_once()
         except Exception as error:
             self.last_error = error
             self._stop.set()
         finally:
             self.capture.close()
+
+    def _capture_and_publish_once(self) -> None:
+        frame = self.capture.fetch_frame(self.fetch_timeout_s)
+        perf_counter_ns = getattr(self.capture, "_perf_counter_ns", time.perf_counter_ns)
+        publish_started_ns = perf_counter_ns()
+        self.latest_frame.publish(frame)
+        record_performance = getattr(self.capture, "_record_performance", None)
+        if callable(record_performance):
+            record_performance(
+                "latest_frame_publish",
+                "lock",
+                perf_counter_ns() - publish_started_ns,
+                sequence_number=frame.sequence_number,
+            )
 
     def stop(self, timeout_s: float = 2.0) -> None:
         self._stop.set()

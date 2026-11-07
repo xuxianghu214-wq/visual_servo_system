@@ -111,6 +111,8 @@ class RobotConnectionSettings:
     controller_family: str
     polyscope_version: str
     state_frequency_hz: float
+    clock_max_uncertainty_s: float
+    clock_reset_backjump_s: float
     expected_tcp_pose_ur: FloatArray
     pose_units: str
 
@@ -152,6 +154,18 @@ class SafetyLimits:
 
 
 @dataclass(frozen=True, slots=True)
+class DiagnosticsSettings:
+    """可丢弃性能诊断通道的有界资源配置。"""
+
+    performance_mode: str
+    queue_capacity: int
+    batch_size: int
+    flush_interval_s: float
+    light_summary_interval_s: float
+    close_timeout_s: float
+
+
+@dataclass(frozen=True, slots=True)
 class SystemConfig:
     camera: CameraSettings
     marker: MarkerSettings
@@ -159,6 +173,7 @@ class SystemConfig:
     target: ServoTargetSettings
     mpc: MpcControllerSettings
     safety: SafetyLimits
+    diagnostics: DiagnosticsSettings
 
 
 def _raise(error_type: type[ConfigurationError], message: str) -> NoReturn:
@@ -448,6 +463,8 @@ def _load_robot_settings(path: Path) -> RobotConnectionSettings:
         "controller_family",
         "polyscope_version",
         "state_frequency_hz",
+        "clock_max_uncertainty_s",
+        "clock_reset_backjump_s",
         "expected_tcp_pose_ur",
         "pose_units",
     }
@@ -468,6 +485,16 @@ def _load_robot_settings(path: Path) -> RobotConnectionSettings:
         family,
         _text(data["polyscope_version"], "polyscope_version"),
         _finite_number(data["state_frequency_hz"], "state_frequency_hz", positive=True),
+        _finite_number(
+            data["clock_max_uncertainty_s"],
+            "clock_max_uncertainty_s",
+            positive=True,
+        ),
+        _finite_number(
+            data["clock_reset_backjump_s"],
+            "clock_reset_backjump_s",
+            positive=True,
+        ),
         tcp_pose,
         units,
     )
@@ -601,8 +628,44 @@ def _load_safety_limits(path: Path) -> SafetyLimits:
     )
 
 
+def _load_diagnostics_settings(path: Path) -> DiagnosticsSettings:
+    data = _load_mapping(path, ConfigurationError)
+    required = {
+        "performance_mode",
+        "queue_capacity",
+        "batch_size",
+        "flush_interval_s",
+        "light_summary_interval_s",
+        "close_timeout_s",
+    }
+    _exact_keys(data, required, str(path))
+    mode = _text(data["performance_mode"], "performance_mode")
+    if mode not in {"OFF", "LIGHT", "FULL_ASYNC"}:
+        raise ConfigurationError("performance_mode must be OFF, LIGHT, or FULL_ASYNC")
+    queue_capacity = _integer(data["queue_capacity"], "queue_capacity", positive=True)
+    batch_size = _integer(data["batch_size"], "batch_size", positive=True)
+    if batch_size > queue_capacity * 64:
+        raise ConfigurationError("batch_size is unreasonably large for queue_capacity")
+    return DiagnosticsSettings(
+        performance_mode=mode,
+        queue_capacity=queue_capacity,
+        batch_size=batch_size,
+        flush_interval_s=_finite_number(
+            data["flush_interval_s"], "flush_interval_s", positive=True
+        ),
+        light_summary_interval_s=_finite_number(
+            data["light_summary_interval_s"],
+            "light_summary_interval_s",
+            positive=True,
+        ),
+        close_timeout_s=_finite_number(
+            data["close_timeout_s"], "close_timeout_s", positive=True
+        ),
+    )
+
+
 def load_system_config(config_directory: str | Path) -> SystemConfig:
-    """加载六个运行配置文件并返回不可变的类型化配置树。"""
+    """加载运行配置文件并返回不可变的类型化配置树。"""
 
     directory = Path(config_directory)
     return SystemConfig(
@@ -612,4 +675,5 @@ def load_system_config(config_directory: str | Path) -> SystemConfig:
         target=_load_target_settings(directory / "servo_target.yaml"),
         mpc=_load_mpc_settings(directory / "mpc_controller.yaml"),
         safety=_load_safety_limits(directory / "safety_limits.yaml"),
+        diagnostics=_load_diagnostics_settings(directory / "diagnostics_settings.yaml"),
     )

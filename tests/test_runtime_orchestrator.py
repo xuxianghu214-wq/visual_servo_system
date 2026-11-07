@@ -244,7 +244,7 @@ def _objects():
     return frame, observation, sample
 
 
-def _runtime():
+def _runtime(performance_profiler=None):
     frame, observation, sample = _objects()
     sender = _Sender()
     runtime = VisualServoOrchestrator(
@@ -255,8 +255,41 @@ def _runtime():
         project_root=None,
         clock=lambda: 1.0,
         start_background_threads=False,
+        performance_profiler=performance_profiler,
     )
     return runtime, sender
+
+
+def test_vision_pipeline_profiles_lock_queue_detection_ekf_and_total() -> None:
+    class Recorder:
+        def __init__(self):
+            self.records = []
+
+        def record(self, **values):
+            self.records.append(values)
+
+    recorder = Recorder()
+    runtime, _ = _runtime(recorder)
+    runtime.start_preview()
+    runtime.connect_robot_read_only()
+    runtime.install_calibration_for_testing(np.eye(4), (8, 6))
+    assert runtime.system_check()
+
+    assert runtime.process_vision_step().valid
+
+    stages = {record["stage"] for record in recorder.records}
+    assert {
+        "pipeline_lock_wait",
+        "frame_queue_age",
+        "marker_detect",
+        "annotation",
+        "robot_pose_interpolation",
+        "ekf_update",
+        "vision_step_total",
+    } <= stages
+    assert next(
+        record for record in recorder.records if record["stage"] == "pipeline_lock_wait"
+    )["kind"] == "lock"
 
 
 def test_default_is_safe_and_order_is_enforced():
