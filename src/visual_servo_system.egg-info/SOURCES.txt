@@ -15,6 +15,8 @@ src/visual_servo_system/control/__init__.py
 src/visual_servo_system/control/mpc_pose_controller.py
 src/visual_servo_system/control/pose_target_builder.py
 src/visual_servo_system/control/servo_target_interpolator.py
+src/visual_servo_system/diagnostics/__init__.py
+src/visual_servo_system/diagnostics/performance_profiler.py
 src/visual_servo_system/estimation/__init__.py
 src/visual_servo_system/estimation/so3_error_state.py
 src/visual_servo_system/estimation/target_pose_ekf.py
@@ -27,6 +29,10 @@ src/visual_servo_system/logging/optional_video_recorder.py
 src/visual_servo_system/logging/session_csv_logger.py
 src/visual_servo_system/models/__init__.py
 src/visual_servo_system/models/data_types.py
+src/visual_servo_system/offline/__init__.py
+src/visual_servo_system/offline/fault_injection.py
+src/visual_servo_system/offline/image_folder_replay.py
+src/visual_servo_system/offline/robot_state_replay.py
 src/visual_servo_system/robot/__init__.py
 src/visual_servo_system/robot/deferred_ur_rtde_servo_sender.py
 src/visual_servo_system/robot/ur_rtde_servo_sender.py
@@ -47,9 +53,14 @@ tests/test_config_loader.py
 tests/test_data_types.py
 tests/test_deployment_assets.py
 tests/test_device_clock_mapper.py
+tests/test_fault_injection.py
 tests/test_latest_value_buffer.py
 tests/test_marker_pose_detector.py
 tests/test_mpc_pose_controller.py
+tests/test_offline_replay.py
+tests/test_offline_scripts.py
+tests/test_performance_analysis_script.py
+tests/test_performance_profiler.py
 tests/test_pose_target_builder.py
 tests/test_pose_transforms.py
 tests/test_robot_pose_history.py
