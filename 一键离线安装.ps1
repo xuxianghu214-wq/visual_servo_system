@@ -25,6 +25,9 @@ $DevelopmentPython = Join-Path $Environment "python.exe"
 $PythonPackageRoot = Join-Path $ProjectRoot "third_party_installers\Python_3.11.9_x64"
 $PythonManifest = Join-Path $PythonPackageRoot "SHA256SUMS.txt"
 $PythonInstaller = Join-Path $PythonPackageRoot "python-3.11.9-amd64.exe"
+$PortablePythonArchive = Join-Path $PythonPackageRoot "python-3.11.9-embed-amd64.zip"
+$PipBootstrapWheel = Join-Path $OfflinePackages "pip-25.3-py3-none-any.whl"
+$ProjectWheel = Join-Path $OfflinePackages "visual_servo_system-0.1.0-py3-none-any.whl"
 
 function Invoke-NativeChecked {
     param(
@@ -91,6 +94,49 @@ function Assert-InstalledProjectPortable {
     if ($ImportExitCode -ne 0) {
         throw "解除临时盘符后无法导入视觉伺服工程，退出码 $ImportExitCode。"
     }
+}
+
+function Expand-PythonEmbeddedRuntime {
+    param(
+        [Parameter(Mandatory = $true)][string]$ArchivePath,
+        [Parameter(Mandatory = $true)][string]$PipWheelPath,
+        [Parameter(Mandatory = $true)][string]$DestinationPath
+    )
+
+    # 官方 embeddable ZIP 不调用 MSI、不写注册表，适合从中文长路径整体复制的工程。
+    # pip wheel 也在工程清单中，直接解包后即可完全离线安装其余锁定 wheel。
+    if (Test-Path -LiteralPath $DestinationPath) {
+        throw "发现不完整的环境目录：$DestinationPath。请删除该目录后重新运行一键安装。"
+    }
+    if (-not (Test-Path -LiteralPath $ArchivePath -PathType Leaf)) {
+        throw "缺少 Python 3.11.9 x64 嵌入式运行时：$ArchivePath"
+    }
+    if (-not (Test-Path -LiteralPath $PipWheelPath -PathType Leaf)) {
+        throw "缺少离线 pip wheel：$PipWheelPath"
+    }
+
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    [System.IO.Compression.ZipFile]::ExtractToDirectory($ArchivePath, $DestinationPath)
+
+    $SitePackages = Join-Path $DestinationPath "Lib\site-packages"
+    New-Item -ItemType Directory -Path $SitePackages -Force | Out-Null
+    [System.IO.Compression.ZipFile]::ExtractToDirectory($PipWheelPath, $SitePackages)
+
+    # embeddable Python 默认隔离第三方包；显式启用 site 并只加入工程内 site-packages。
+    $PathConfiguration = Join-Path $DestinationPath "python311._pth"
+    @(
+        "python311.zip"
+        "."
+        "Lib"
+        "Lib\site-packages"
+        "import site"
+    ) | Set-Content -LiteralPath $PathConfiguration -Encoding Ascii
+
+    $EmbeddedPython = Join-Path $DestinationPath "python.exe"
+    if (-not (Test-Path -LiteralPath $EmbeddedPython -PathType Leaf)) {
+        throw "Python 嵌入式运行时解压后未找到：$EmbeddedPython"
+    }
+    return $EmbeddedPython
 }
 
 function New-ShortPathMapping {
@@ -188,21 +234,31 @@ else {
         throw "Python 3.11.9 x64 安装程序的 Authenticode 签名无效，状态：$($PythonSignature.Status)。已拒绝运行。"
     }
 
-    $PortablePython = Join-Path $ProjectRoot ".python311"
-    $Arguments = "/quiet InstallAllUsers=0 Include_launcher=0 Include_test=0 Include_pip=1 PrependPath=0 TargetDir=`"$PortablePython`""
-    $InstallerProcess = Start-Process -FilePath $PythonInstaller -ArgumentList $Arguments -Wait -WindowStyle Hidden -PassThru
-    Assert-ProcessSucceeded -Process $InstallerProcess -StepName "Python 3.11.9 安装程序"
+    if (Test-Path -LiteralPath $PortablePythonArchive -PathType Leaf) {
+        # 首选无 MSI 的工程内运行时，避开目标电脑 Package Cache、注册表和管理员权限差异。
+        $PythonExe = Expand-PythonEmbeddedRuntime `
+            -ArchivePath $PortablePythonArchive `
+            -PipWheelPath $PipBootstrapWheel `
+            -DestinationPath $Environment
+    }
+    else {
+        # 兼容旧备份：没有 embeddable ZIP 时仍可使用已签名的官方安装程序。
+        $PortablePython = Join-Path $ProjectRoot ".python311"
+        $Arguments = "/quiet InstallAllUsers=0 Include_launcher=0 Include_test=0 Include_pip=1 PrependPath=0 TargetDir=`"$PortablePython`""
+        $InstallerProcess = Start-Process -FilePath $PythonInstaller -ArgumentList $Arguments -Wait -WindowStyle Hidden -PassThru
+        Assert-ProcessSucceeded -Process $InstallerProcess -StepName "Python 3.11.9 安装程序"
 
-    $PortablePythonExe = Join-Path $PortablePython "python.exe"
-    if (-not (Test-Path -LiteralPath $PortablePythonExe -PathType Leaf)) {
-        throw "Python 安装程序返回成功，但没有生成：$PortablePythonExe"
+        $PortablePythonExe = Join-Path $PortablePython "python.exe"
+        if (-not (Test-Path -LiteralPath $PortablePythonExe -PathType Leaf)) {
+            throw "Python 安装程序返回成功，但没有生成：$PortablePythonExe"
+        }
+        # venv 必须用真实路径创建，保证 pyvenv.cfg 不会引用稍后解除的临时盘符。
+        Invoke-NativeChecked -FilePath $PortablePythonExe -ArgumentList @("-m", "venv", $Environment) -StepName "创建标准 venv"
+        if (-not (Test-Path -LiteralPath $StandardPython -PathType Leaf)) {
+            throw "标准 venv 创建完成后仍未找到：$StandardPython"
+        }
+        $PythonExe = $StandardPython
     }
-    # venv 必须用真实路径创建，保证 pyvenv.cfg 不会引用稍后解除的临时盘符。
-    Invoke-NativeChecked -FilePath $PortablePythonExe -ArgumentList @("-m", "venv", $Environment) -StepName "创建标准 venv"
-    if (-not (Test-Path -LiteralPath $StandardPython -PathType Leaf)) {
-        throw "标准 venv 创建完成后仍未找到：$StandardPython"
-    }
-    $PythonExe = $StandardPython
 }
 
 if (-not $TestOnlyPythonOverride) {
@@ -227,6 +283,7 @@ try {
     $ShortOfflinePackages = Join-Path $MappedRoot "offline_packages"
     $ShortRequirements = Join-Path $MappedRoot "requirements-lock.txt"
     $ShortVerifyScript = Join-Path $MappedRoot "scripts\verify_environment.py"
+    $ShortProjectWheel = Join-Path $ShortOfflinePackages "visual_servo_system-0.1.0-py3-none-any.whl"
 
     Invoke-NativeChecked -FilePath $ShortPython -ArgumentList @(
         "-m", "pip", "install", "--no-index", "--find-links", $ShortOfflinePackages,
@@ -234,7 +291,7 @@ try {
     ) -StepName "安装锁定依赖"
     Invoke-NativeChecked -FilePath $ShortPython -ArgumentList @(
         "-m", "pip", "install", "--no-index", "--no-deps", "--no-build-isolation",
-        "--force-reinstall", $MappedRoot
+        "--force-reinstall", $ShortProjectWheel
     ) -StepName "安装视觉伺服工程"
     Invoke-NativeChecked -FilePath $ShortPython -ArgumentList @($ShortVerifyScript) -StepName "验证运行环境"
 }

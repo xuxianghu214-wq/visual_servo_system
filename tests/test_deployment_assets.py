@@ -37,6 +37,10 @@ def test_powershell_scripts_use_project_root_and_offline_install():
     assert "$PSScriptRoot" in install
     assert "--no-index" in install and "offline_packages" in install
     assert r"third_party_installers\Python_3.11.9_x64" in install
+    assert "python-3.11.9-embed-amd64.zip" in install
+    assert "pip-25.3-py3-none-any.whl" in install
+    assert "visual_servo_system-0.1.0-py3-none-any.whl" in install
+    assert "Expand-PythonEmbeddedRuntime" in install
     assert "$PSScriptRoot" in launch
     assert "$PSScriptRoot" in driver and "管理员" in driver
     assert "Invoke-NativeChecked" in install
@@ -49,7 +53,7 @@ def test_powershell_scripts_use_project_root_and_offline_install():
     assert "finally" in install
     assert '"-e", $MappedRoot' not in install
     assert '"--no-build-isolation",' in install
-    assert '"--force-reinstall", $MappedRoot' in install
+    assert '"--force-reinstall", $ShortProjectWheel' in install
     portable_check = (
         "Assert-InstalledProjectPortable -FilePath $PythonExe "
         "-ProjectRoot $ProjectRoot"
@@ -89,6 +93,21 @@ def test_all_powershell_entry_scripts_parse_without_errors():
             timeout=15,
         )
         assert completed.returncode == 0, f"{name}: {completed.stdout}{completed.stderr}"
+
+
+def test_portable_python_bootstrap_assets_are_present_and_manifested():
+    python_assets = ROOT / "third_party_installers" / "Python_3.11.9_x64"
+    embedded_runtime = python_assets / "python-3.11.9-embed-amd64.zip"
+    pip_wheel = ROOT / "offline_packages" / "pip-25.3-py3-none-any.whl"
+    project_wheel = (
+        ROOT / "offline_packages" / "visual_servo_system-0.1.0-py3-none-any.whl"
+    )
+
+    assert embedded_runtime.is_file()
+    assert pip_wheel.is_file()
+    assert project_wheel.is_file()
+    assert _run_manifest_check(python_assets).returncode == 0
+    assert _run_manifest_check(ROOT / "offline_packages").returncode == 0
 
 
 def test_offline_installer_propagates_native_failure_and_never_prints_success(tmp_path):
@@ -302,19 +321,19 @@ def test_test_only_python_override_is_rejected_outside_pytest(tmp_path):
     assert b"TEST-ONLY Python override is disabled outside pytest" in output
 
 
-def test_user_docs_use_standard_venv_launcher_and_consistent_dry_run_order():
+def test_user_docs_use_portable_python_launcher_and_consistent_dry_run_order():
     readme = (ROOT / "README_先看这里.md").read_text("utf-8")
     migration = (ROOT / "docs" / "迁移验收.md").read_text("utf-8")
     combined = readme + migration
-    assert r".venv\Scripts\python.exe" in combined
-    assert r".venv\python.exe" not in combined
+    assert r".venv\python.exe" in combined
     assert "连接机器人只读" in migration
     assert "干运行不发送" in migration
-    assert "507 MB" in combined
+    assert "521 MB" in combined
     assert "不要复制 `.venv`" in combined
     assert "subst.exe" in combined
     assert "SHA256SUMS.txt" in combined
     assert "Python 安装程序的 Authenticode" in combined
+    assert "嵌入式运行时" in combined
     assert "非 editable" in combined
 
 

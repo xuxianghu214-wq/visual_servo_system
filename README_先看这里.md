@@ -21,8 +21,8 @@ Point Grey Research Blackfly S **BFS-U3-13Y3C**，序列号 **16276663**。工�
 
 ## 环境与检查
 
-随工程携带的 `offline_packages`、Python 3.11.9 x64 安装程序和 Spinnaker 4.4.0.246
-离线组件合计约 **507 MB**（约 484 MiB）。复制到另一台电脑时应整体复制工程和这些安装资源，
+随工程携带的 `offline_packages`、Python 3.11.9 x64 官方嵌入式运行时、官方安装程序和
+Spinnaker 4.4.0.246 离线组件合计约 **521 MB**（约 497 MiB）。复制到另一台电脑时应整体复制工程和这些安装资源，
 但**不要复制 `.venv` 和 `.python311`**；这两个目录含有原电脑的绝对路径，必须在目标电脑重新生成。
 
 首次迁移到 Windows 10/11 x64 电脑时，按顺序运行：
@@ -30,42 +30,42 @@ Point Grey Research Blackfly S **BFS-U3-13Y3C**，序列号 **16276663**。工�
 ```powershell
 .\安装相机驱动.ps1
 .\一键离线安装.ps1
-.\.venv\Scripts\python.exe .\scripts\verify_environment.py
+.\.venv\python.exe .\scripts\verify_environment.py
 .\启动视觉伺服.ps1
 ```
 
-驱动安装脚本会再次请求明确确认和管理员权限；Python 依赖安装本身不需要管理员权限。若当前
-工程内尚未放入 Python 安装程序、离线 wheel 或 Spinnaker 安装包，脚本会明确报出缺失文件，
+驱动安装脚本会再次请求明确确认和管理员权限；Python 依赖安装本身不需要管理员权限。若
+Python 运行时、离线 wheel 或 Spinnaker 安装包缺失，脚本会明确报错，
 不会联网下载或伪装成功。两个安装脚本都会先按 `SHA256SUMS.txt` 严格检查文件：缺失、额外、
 被篡改或带目录穿越的清单都会被拒绝；Python 安装程序的 Authenticode 签名和相机驱动完整
 EXE 的 Authenticode 签名都必须有效。
 
-`一键离线安装.ps1` 会精确使用随工程提供的 Python 3.11.9 x64，在真实工程路径创建标准
-`.venv`。安装 wheel 和运行环境检查时，脚本自动用 `subst.exe` 将工程临时映射到一个从 Z:
+`一键离线安装.ps1` 会优先把随工程提供的 Python 3.11.9 x64 官方嵌入式运行时解压为
+`.venv`，不调用 MSI、不写系统注册表；官方 EXE 仍作为兼容后备并校验 Authenticode 签名。
+安装 wheel 和运行环境检查时，脚本自动用 `subst.exe` 将工程临时映射到一个从 Z:
 向下寻找的空闲盘符，并把 TEMP/TMP 临时指向该短路径，以规避 PySide6 在长中文路径下可能触发
 的 Win32 260 字符限制。无论成功还是失败，临时目录和盘符映射都会在 `finally` 中清理，不需要
-管理员权限，也不会让 `pyvenv.cfg` 永久引用临时盘符。工程本体采用非 editable 方式安装到
+管理员权限。工程本体使用工程内预构建 wheel，以非 editable 方式安装到
 虚拟环境；解除临时盘符后脚本还会隔离导入已安装包并加载真实启动入口，防止 `.pth` 固化
 `Z:\src` 一类临时路径。
 
 开发检查命令为：
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest
-.\.venv\Scripts\python.exe -m ruff check .
+.\.venv\python.exe -m pytest
+.\.venv\python.exe -m ruff check .
 ```
 
 不连接硬件的离线回归命令为：
 
 ```powershell
-.\.venv\Scripts\python.exe .\scripts\run_offline_validation.py
-.\.venv\Scripts\python.exe .\scripts\benchmark_diagnostics_modes.py --cycles 2000
+.\.venv\python.exe .\scripts\run_offline_validation.py
+.\.venv\python.exe .\scripts\benchmark_diagnostics_modes.py --cycles 2000
 ```
 
-用户运行统一使用 `启动视觉伺服.ps1`。仓库维护时可能使用根目录含 `python.exe` 的 Conda
-开发环境，但它不是迁移部署结构；启动脚本优先使用标准 `.venv\Scripts\python.exe`，仅在
-标准入口不存在时兼容开发环境。迁移电脑必须删除/不复制旧 `.venv`，再运行一键安装脚本创建
-标准环境。
+用户运行统一使用 `启动视觉伺服.ps1`。启动脚本同时兼容标准 venv 的
+`.venv\Scripts\python.exe` 和本工程离线部署生成的 `.venv\python.exe`。迁移电脑必须
+删除/不复制旧 `.venv`，再运行一键安装脚本创建本机环境。
 
 直接依赖、传递依赖和构建后端的已验证版本锁在 `requirements-lock.txt`。运行配置位于
 `config_files/`，加载器不采用隐式默认值：缺字段、
