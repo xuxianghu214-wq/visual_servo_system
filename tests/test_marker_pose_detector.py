@@ -109,6 +109,37 @@ def test_half_resolution_detection_maps_corners_back_to_full_image() -> None:
     )
 
 
+def test_detector_exposes_separate_high_resolution_stage_timings() -> None:
+    camera_matrix, distortion = _intrinsics()
+    detector = MarkerPoseDetector(
+        MarkerPoseDetectorConfig(
+            "apriltag",
+            "tag36h11",
+            "DICT_4X4_50",
+            0,
+            0.08,
+            detection_scale=0.5,
+        ),
+        camera_matrix,
+        distortion,
+    )
+
+    observation = detector.detect(_synthetic_marker("DICT_APRILTAG_36h11", 0), 3.0)
+
+    assert observation.valid
+    timings = detector.last_stage_timings_ns
+    assert {
+        "input_to_gray",
+        "resize_for_search",
+        "apriltag_search",
+        "corner_map_and_refine",
+        "pnp_solve",
+        "detector_total",
+    } <= timings.keys()
+    assert all(type(value) is int and value >= 0 for value in timings.values())
+    assert timings["detector_total"] >= timings["apriltag_search"]
+
+
 def test_detector_does_not_switch_to_wrong_visible_id() -> None:
     camera_matrix, distortion = _intrinsics()
     detector = MarkerPoseDetector(

@@ -31,9 +31,10 @@ Point Grey Research Blackfly S **BFS-U3-13Y3C**，序列号 **16276663**。工�
 - 相机内参：`calibration_files/camera_intrinsics.yaml`
 - 眼在手上手眼外参：`calibration_files/hand_eye_eye_in_hand.yaml`
 
-两个随仓库提供的文件都是**故意不完整的模板**：`calibration_complete: false` 且标定数值为
-`null`。它们绝不是单位阵标定。未完成并复核真实标定时，软件只允许相机预览，不允许进入
-视觉伺服或向机器人发送运动命令。
+当前便携工程已保留用户确认的真实标定结果，两个文件的
+`calibration_complete` 均为 `true`。程序仍会严格校验分辨率、有限数、旋转矩阵、坐标系和单位；
+校验失败时只允许预览。若相机、镜头、焦距、安装位姿或分辨率发生变化，必须重新标定，
+不得继续沿用当前 YAML。
 
 手眼矩阵名称固定为 `T_flange_camera`，父坐标系是 `flange`，子坐标系是
 `camera_optical`。它把相机光学坐标中的点映射到法兰坐标，平移单位为 metres（米）。
@@ -74,6 +75,13 @@ EXE 的 Authenticode 签名都必须有效。
 .\.venv\Scripts\python.exe -m ruff check .
 ```
 
+不连接硬件的离线回归命令为：
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\run_offline_validation.py
+.\.venv\Scripts\python.exe .\scripts\benchmark_diagnostics_modes.py --cycles 2000
+```
+
 用户运行统一使用 `启动视觉伺服.ps1`。仓库维护时可能使用根目录含 `python.exe` 的 Conda
 开发环境，但它不是迁移部署结构；启动脚本优先使用标准 `.venv\Scripts\python.exe`，仅在
 标准入口不存在时兼容开发环境。迁移电脑必须删除/不复制旧 `.venv`，再运行一键安装脚本创建
@@ -101,8 +109,10 @@ TCP=0。点击实机使能后，程序会先丢弃干运行的 EKF、预测、MP
 安全平面和现场风险评估。实机首次运行请严格按照 `docs/实机联调步骤.md`。
 
 每次程序启动会在 `experiment_logs/` 建立不覆盖的会话目录，写入 manifest 以及 vision、EKF、
-prediction、MPC、robot_state、safety_events、timing 七类 CSV。图像/视频保存默认关闭，只有界面
-明确选择后才写入。
+prediction、MPC、robot_state、safety_events、timing 七类业务 CSV。图像/视频保存默认关闭。
+`config_files/diagnostics_settings.yaml` 控制性能诊断：`OFF` 不记录逐阶段数据，`LIGHT` 输出
+`performance_summary.csv`，`FULL_ASYNC` 才异步写入 `performance_stages.csv`。三种模式均不影响独立的
+`safety_events.csv`。普通性能诊断队列满时可丢弃并计数，不得阻塞相机、视觉、RTDE 或控制线程。
 
 ## 坐标与时间约定
 
@@ -112,7 +122,8 @@ prediction、MPC、robot_state、safety_events、timing 七类 CSV。图像/视�
 - `host_timestamp_s` 是设备采样/曝光时钟映射到主机单调时钟后的时刻，只用于排序、配准和
   延迟计算，不是 UTC 时间；`receive_timestamp_s` 是主机实际收到数据的时刻。
 - 相机没有设备曝光时间或 RTDE 没有控制器时间时会明确标为“不可靠”，只允许预览和干运行，
-  禁止进入实机闭环。时钟回退会重置映射，重新积累足够样本前同样禁止实机运动。
+  禁止进入实机闭环。RTDE 重复时间戳不会再触发时钟重置，也不会发布成新状态；小幅回退按乱序处理，
+  只有超过配置回退量的真实时基变化才重建映射。
 - 机器人预期 TCP 必须是六维零值；只有控制接口实际读取并确认 TCP=0 后，程序才把
   `actual_TCP_pose` 解释为 `T_base_flange`，未授信读数只作无效状态显示且不进入位姿历史。
   授信必须通过 `sender.authorize_state_reader(reader)` 建立，并由发送器在停止或异常时自动撤销。

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 
 import cv2
@@ -147,6 +148,13 @@ class MarkerPoseDetector:
         self._last_valid_timestamp_s: float | None = None
         self._consecutive_missing = 0
         self.last_corners: np.ndarray | None = None
+        self._last_stage_timings_ns: dict[str, int] = {}
+
+    @property
+    def last_stage_timings_ns(self) -> dict[str, int]:
+        """最近一次检测的分阶段耗时副本；只用于性能诊断。"""
+
+        return dict(self._last_stage_timings_ns)
 
     def reset_tracking(self) -> None:
         """清除连续性锚点；重新使能或场景切换时由上层显式调用。"""
@@ -233,82 +241,116 @@ class MarkerPoseDetector:
         return transform, error
 
     def detect(self, image: np.ndarray, host_timestamp_s: float) -> MarkerPoseObservation:
-        timestamp_s = float(host_timestamp_s)
-        self._prepare_reacquisition(timestamp_s)
-        if image.ndim == 3:
-            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        elif image.ndim == 2:
-            gray = image
-        else:
-            raise ValueError("image 必须是灰度或 BGR 图像")
-        scale = self.config.detection_scale
-        if scale < 1.0:
-            detection_image = cv2.resize(
-                gray,
-                None,
-                fx=scale,
-                fy=scale,
-                interpolation=cv2.INTER_AREA,
-            )
-        else:
-            detection_image = gray
-        corners_list, ids, _rejected = self._detector.detectMarkers(detection_image)
-        if ids is None:
-            return self._missing_observation(timestamp_s)
-        matching = np.flatnonzero(ids.reshape(-1) == self.config.marker_id)
-        if matching.size != 1:
-            return self._missing_observation(timestamp_s)
-        corners = np.asarray(corners_list[int(matching[0])], dtype=np.float64).reshape(4, 2)
-        if scale < 1.0:
-            # 搜索可以用小图加速，但相机内参和 PnP 都属于原分辨率。
-            # 因此先恢复原图坐标，再在原灰度图上做一次亚像素精修。
-            corners /= scale
-            refined = corners.astype(np.float32).reshape(-1, 1, 2)
-            height, width = gray.shape
-            refinement_margin = 6.0
-            inside = bool(
-                np.all(refined[:, 0, 0] >= refinement_margin)
-                and np.all(refined[:, 0, 0] < width - refinement_margin)
-                and np.all(refined[:, 0, 1] >= refinement_margin)
-                and np.all(refined[:, 0, 1] < height - refinement_margin)
-            )
-            if inside:
-                cv2.cornerSubPix(
+        total_started_ns = time.perf_counter_ns()
+        timings: dict[str, int] = {}
+        try:
+            timestamp_s = float(host_timestamp_s)
+            self._prepare_reacquisition(timestamp_s)
+
+            stage_started_ns = time.perf_counter_ns()
+            if image.ndim == 3:
+                gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            elif image.ndim == 2:
+                gray = image
+            else:
+                raise ValueError("image 必须是灰度或 BGR 图像")
+            timings["input_to_gray"] = time.perf_counter_ns() - stage_started_ns
+
+            scale = self.config.detection_scale
+            stage_started_ns = time.perf_counter_ns()
+            if scale < 1.0:
+                detection_image = cv2.resize(
                     gray,
-                    refined,
-                    (5, 5),
-                    (-1, -1),
-                    (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_MAX_ITER, 20, 0.01),
+                    None,
+                    fx=scale,
+                    fy=scale,
+                    interpolation=cv2.INTER_AREA,
                 )
-                corners = refined.reshape(4, 2).astype(np.float64)
-        side_lengths = np.linalg.norm(np.roll(corners, -1, axis=0) - corners, axis=1)
-        area = abs(float(cv2.contourArea(corners.astype(np.float32))))
-        if float(np.min(side_lengths)) < self.config.min_side_px or area <= 0.0:
-            return self._missing_observation(timestamp_s, corners)
-        solved = self._solve_pose(corners)
-        if solved is None:
-            return self._missing_observation(timestamp_s, corners)
-        transform, error = solved
-        if not np.isfinite(error) or error > self.config.max_reprojection_error_px:
-            return self._missing_observation(timestamp_s, corners)
-        self._last_transform = transform
-        self._last_valid_timestamp_s = timestamp_s
-        self._consecutive_missing = 0
-        self.last_corners = corners
-        quality = float(
-            np.clip(1.0 - error / self.config.max_reprojection_error_px, 0.0, 1.0)
-        )
-        # OpenCV ArUco 不提供 decision margin；None 与像素平方单位的面积分别保存。
-        return MarkerPoseObservation(
-            timestamp_s,
-            self.config.marker_id,
-            transform,
-            float(error),
-            None,
-            float(area),
-            True,
-            quality,
-        )
+            else:
+                detection_image = gray
+            timings["resize_for_search"] = time.perf_counter_ns() - stage_started_ns
+
+            stage_started_ns = time.perf_counter_ns()
+            corners_list, ids, _rejected = self._detector.detectMarkers(detection_image)
+            timings["apriltag_search"] = time.perf_counter_ns() - stage_started_ns
+            if ids is None:
+                return self._missing_observation(timestamp_s)
+            matching = np.flatnonzero(ids.reshape(-1) == self.config.marker_id)
+            if matching.size != 1:
+                return self._missing_observation(timestamp_s)
+
+            stage_started_ns = time.perf_counter_ns()
+            corners = np.asarray(
+                corners_list[int(matching[0])], dtype=np.float64
+            ).reshape(4, 2)
+            if scale < 1.0:
+                # 搜索可以用小图加速，但相机内参和 PnP 都属于原分辨率。
+                # 因此先恢复原图坐标，再在原灰度图上做一次亚像素精修。
+                corners /= scale
+                refined = corners.astype(np.float32).reshape(-1, 1, 2)
+                height, width = gray.shape
+                refinement_margin = 6.0
+                inside = bool(
+                    np.all(refined[:, 0, 0] >= refinement_margin)
+                    and np.all(refined[:, 0, 0] < width - refinement_margin)
+                    and np.all(refined[:, 0, 1] >= refinement_margin)
+                    and np.all(refined[:, 0, 1] < height - refinement_margin)
+                )
+                if inside:
+                    cv2.cornerSubPix(
+                        gray,
+                        refined,
+                        (5, 5),
+                        (-1, -1),
+                        (
+                            cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_MAX_ITER,
+                            20,
+                            0.01,
+                        ),
+                    )
+                    corners = refined.reshape(4, 2).astype(np.float64)
+            timings["corner_map_and_refine"] = (
+                time.perf_counter_ns() - stage_started_ns
+            )
+
+            stage_started_ns = time.perf_counter_ns()
+            side_lengths = np.linalg.norm(
+                np.roll(corners, -1, axis=0) - corners, axis=1
+            )
+            area = abs(float(cv2.contourArea(corners.astype(np.float32))))
+            timings["quality_gate"] = time.perf_counter_ns() - stage_started_ns
+            if float(np.min(side_lengths)) < self.config.min_side_px or area <= 0.0:
+                return self._missing_observation(timestamp_s, corners)
+
+            stage_started_ns = time.perf_counter_ns()
+            solved = self._solve_pose(corners)
+            timings["pnp_solve"] = time.perf_counter_ns() - stage_started_ns
+            if solved is None:
+                return self._missing_observation(timestamp_s, corners)
+            transform, error = solved
+            if not np.isfinite(error) or error > self.config.max_reprojection_error_px:
+                return self._missing_observation(timestamp_s, corners)
+            self._last_transform = transform
+            self._last_valid_timestamp_s = timestamp_s
+            self._consecutive_missing = 0
+            self.last_corners = corners
+            quality = float(
+                np.clip(1.0 - error / self.config.max_reprojection_error_px, 0.0, 1.0)
+            )
+            # OpenCV ArUco 不提供 decision margin；None 与像素平方单位的面积分别保存。
+            return MarkerPoseObservation(
+                timestamp_s,
+                self.config.marker_id,
+                transform,
+                float(error),
+                None,
+                float(area),
+                True,
+                quality,
+            )
+        finally:
+            timings["detector_total"] = time.perf_counter_ns() - total_started_ns
+            self._last_stage_timings_ns = timings
 
     def draw_detection(self, image: np.ndarray, observation: MarkerPoseObservation) -> np.ndarray:
         """返回带角点和坐标轴的副本，不修改采集线程持有的原图。"""
