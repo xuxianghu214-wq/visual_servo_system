@@ -29,6 +29,8 @@ def test_expected_packages_exist() -> None:
         "runtime",
         "config",
         "models",
+        "diagnostics",
+        "offline",
     }
 
     assert (PACKAGE_ROOT / "__init__.py").is_file()
